@@ -25,3 +25,8 @@ Filesystem events are streamed to stdout for other programs to process.
         CREATE,ISDIR	/tmp/bar
         + rmdir /tmp/bar
         DELETE,ISDIR	/tmp/bar
+
+### todo:
+* path to dir has to be absolute
+  if relative, watchdir might not pick it up..
+
