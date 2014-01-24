@@ -19,7 +19,13 @@ test: all
 u: watchdir
 	./watchdir
 
-t: watchcore
+t-watchcore: watchcore
 	./driver.sh | ./watchcore
+d:
+	./watchdir.py watch x.dir/
 
+t:
+	./test2.sh
 
+w:
+	./watchdir.py watch x.dir/

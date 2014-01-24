@@ -115,6 +115,7 @@ void report(struct inotify_event *event)
 {
 	printf("{ \"type\": \"event\", \"wd\": %u, \"path\": \"%s\", \"mask\": %u }\n", 
 	       event->wd, event->name, event->mask);
+	fflush(stdout);
 }
 
 int read_ino(int fd)
@@ -241,6 +242,13 @@ int main(int argc, const char* argv[])
 				if (cmd.code==CMD_QUIT) {
 					break;
 				} else {
+					/* 
+					 * xxx perhaps commands should not be executed here 
+					 * in the handler.  may be the info should be saved
+					 * and written when ino_fd is writable.
+					 * there is a race where commands a lost 
+					 * when they come in rapid succession..
+					 */
 					int s=cmd_execute(&cmd, read_fds[1]);
 					if (s<0) {
 						fprintf(stderr, "error: executing cmd");
