@@ -6,244 +6,265 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/inotify.h>
-
-/**
-   based on ...
- */
+#include <sys/select.h>
+#include <linux/limits.h>
 
 #define EVENT_SIZE  ( sizeof (struct inotify_event) )
 #define EVENT_BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
+#define CMD_BUF_LEN 4096
 
-struct event_type {
-	const char *name;
-	int mask;
-	const char *desc;
+#define CMD_QUIT 0
+#define CMD_ADD 1
+#define CMD_RM 2
+
+int debug=0;
+
+struct cmd {
+	int code;
+	char path[PATH_MAX];	/* add */
+	uint32_t mask;		/* add */
+	uint32_t wd;		/* rm */
 };
 
-struct event_type event_types[]={
-	{ "ACCESS", 		0x00000001,	"File was accessed" },
-	{ "MODIFY", 		0x00000002,	"File was modified" },
-	{ "ATTRIB", 		0x00000004,	"Metadata changed" },
-	{ "CLOSE_WRITE", 	0x00000008,	"Writtable file was closed" },
-	{ "CLOSE_NOWRITE", 	0x00000010,	"Unwrittable file closed" },
-	{ "OPEN", 		0x00000020,	"File was opened" },
-	{ "MOVED_FROM", 	0x00000040,	"File was moved from X" },
-	{ "MOVED_TO", 		0x00000080,	"File was moved to Y" },
-	{ "CREATE", 		0x00000100,	"Subfile was created" },
-	{ "DELETE", 		0x00000200,	"Subfile was deleted" },
-	{ "DELETE_SELF", 	0x00000400,	"Self was deleted" },
-	{ "MOVE_SELF", 		0x00000800,	"Self was moved" },
-};
-
-struct event_type modifier_types[]={
-	/* test the most likely ones first. */
-	{ "ISDIR",		0x40000000,	"event occurred against dir" },
-
-	/* the following are legal events.  they are sent as needed to any watch */
-	{ "UNMOUNT",		0x00002000,	"Backing fs was unmounted" },
-	{ "Q_OVERFLOW",		0x00004000,	"Event queued overflowed" },
-	{ "IGNORED",		0x00008000,	"File was ignored" },
-
-	/* helper events 
-	 * { "CLOSE",		(IN_CLOSE_WRITE, | IN_CLOSE_NOWRITE) "close" },
-	 * { "MOVE",		(IN_MOVED_FROM, | IN_MOVED_TO) "moves" },
-	 */
-
-	/* special flags */
-	{ "ONLYDIR",		0x01000000,	"only watch the path if it is a directory" },
-	{ "DONT_FOLLOW",	0x02000000,	"don't follow a sym link" },
-	{ "MASK_ADD",		0x20000000,	"add to the mask of an already existing watch" },
-	{ "ONESHOT",		0x80000000,	"only send event once" },
-
-	};
-
-int num_event_types=sizeof(event_types)/sizeof(struct event_type);
-int num_modifier_types=sizeof(modifier_types)/sizeof(struct event_type);
-
-void dump_event(struct inotify_event *e, const char *msg) 
+void cmd_zero(struct cmd *cmdp) 
 {
-	if (msg==NULL) {
-		msg="";
-	}
-	fprintf(stderr, "event: %s %d %s\n", msg, e->wd, e->name);
+	cmdp->code=-1;
+	bzero(cmdp->path, PATH_MAX);
+	cmdp->mask=0;
+	cmdp->wd=0;
 }
 
-struct dir {
-	const char *path;
-	int wd;
-};
-
-struct opts {
-	int mask;
-
-	struct dir *dirv;
-	int dirc;
-
-	struct event_type **event_typev;
-	int event_typec;
-};
-
-/* 
-   parse 
-   $0 dir1 dir2 ... -f flg1 flg2 ...
-   Directories get written to the dirv arg.
-   Mask is returned.
+void cmd_dump(struct cmd *cmdp) 
+{
+	/* xx code-dependent presentation.. */
+	printf("cmd: code=%d path='%s' mask= %d wd=%u\n", 
+	       cmdp->code, cmdp->path, cmdp->mask, cmdp->wd);
+}
+/** command parser
+ * command syntax: <cmd-name> <arg> [<arg>]\n
+ *    tokens are (single) space-separated
+ *    note: the syntax is space sensitive; there should be no leading nor tailing spaces
+ *          and tokens must be separated by exactly one space.
+ * cmd spec
+ *    todo..
+ * example
+ *    add x.dir 768
+ *    rm 1
+ *    quit
  */
-struct opts opts_init(int argc, const char* argv[]) 
+int read_cmd(int fd, struct cmd *cmdp) 
 {
-	struct opts opts;
+	char buf[CMD_BUF_LEN];
+	char *cmd_tok;
+	int length;
 
-	opts.mask=0;
-	opts.dirv=malloc(sizeof(struct dir)*argc) ;
-	opts.event_typev=malloc(sizeof(struct event_type)*num_event_types);
-
-	const char *sep="-f";
-	int i=0;
-	int j=0;
-	int l=0;
-
-	i++;			/* lose program name */
-	for (; i<argc; i++) {
-		if (strncmp(argv[i], sep, strlen(sep))==0) {
-			break;
-		}
-		opts.dirv[j].path=argv[i];
-		opts.dirv[j].wd=0;
-		j++;
+	length = read(fd, buf, CMD_BUF_LEN-1); 
+	buf[length]='\0';
+	if (debug)
+		printf("debug: read %d %s", length, buf);
+	if (length==0) {
+		/* termination command */
+		cmdp->code=CMD_QUIT;
+		return 0;
+	} else if ( length < 0 ) {
+		perror( "read" );
+		return -1;
 	}
-	opts.dirc=j;
-	i++;			/* lose the sep */
-	for (; i<argc; i++) {
-		int k;
-		struct event_type *matching_event=NULL;
 
-		for (k=0; k<num_event_types; k++) {
-			if (strcasecmp(argv[i], event_types[k].name)==0) {
-				matching_event=&event_types[k];
-				break;
-			}
-		}
-		if (matching_event) {
-			opts.event_typev[l++]=matching_event;
-			assert(l<num_event_types); /* should not happen unless repeated.. */
-			opts.mask|=matching_event->mask;
-		} else {
-			fprintf(stderr, "ignoring unknown event '%s'\n", argv[i]);
-		}
+	cmd_tok=strtok(buf, " ");
+	if (debug)
+		fprintf(stderr, "debug: op=%s\n", cmd_tok);
+	if (cmd_tok==NULL) {
+		fprintf(stderr, "warn: got null token\n"); /* ?? */
+	} else if (strncmp(cmd_tok, "quit", strlen("quit"))==0) {
+		cmdp->code=CMD_QUIT;
+	} else if (strcmp(cmd_tok, "add")==0) { 
+		/* add-watch: add <path> <mask> */
+		char *t1, *t2;
+
+		cmdp->code=CMD_ADD;
+
+		t1=strtok(NULL, " ");
+		assert(t1);
+		strncpy(cmdp->path, t1, PATH_MAX);
+		// cmdp->path=strdup(t1);
+
+		t2=strtok(NULL, " ");
+		assert(t2);
+		sscanf(t2, "%d", &cmdp->mask);
+
+	} else if (strcmp(cmd_tok, "rm")==0) { 
+		/* rm-watch: rm <wd> */
+		char *t;
+
+		cmdp->code=CMD_RM;
+
+		t=strtok(NULL, " ");
+		assert(t);
+		sscanf(t, "%d", &cmdp->wd);
+
+	} else {
+		printf("unknown cmd %s\n", cmd_tok);
+		return -1;
 	}
-	opts.event_typec=l;
-	return opts;
+
+	return 0;
 }
 
-void opts_finish(struct opts* opts) 
+void report(struct inotify_event *event)
 {
-	free(opts->dirv);
-	opts->dirv=NULL;
-	free(opts->event_typev);
-	opts->event_typev=NULL;
-}
-
-void report(struct inotify_event *event, struct opts *opts)
-{
-	int i;
-	int event_mask=event->mask;
-	const char *dir_path=NULL;
-
-	/* 
-	 * find the dir 
-	 */
-	for (i=0; i<opts->dirc; i++) {
-		if (opts->dirv[i].wd==event->wd) {
-			dir_path=opts->dirv[i].path;
-			break;
-		}
-	}
-
-	/* 
-	 * find the matching event type.
-	 */
-	for (i=0; i<opts->event_typec && event_mask; i++) {
-		struct event_type *et=opts->event_typev[i];
-
-		if (event_mask & et->mask) {
-			printf("%s", et->name);
-			event_mask &= ~et->mask;
-			break;	/* at most one event type should match */
-		}
-	}
-	/* 
-	 * if there are bits left, scan for non-event (modifier) flags.
-	 */
-	for (i=0; i<num_modifier_types && event_mask; i++) {
-		struct event_type *modifier=&modifier_types[i];
-		if (event_mask & modifier->mask) {
-			printf(",%s", modifier->name);
-			event_mask &= ~modifier->mask;
-		}
-	}
-
-	printf("\t%s%s%s\n", 
-	       dir_path, 
-	       dir_path[strlen(dir_path)-1]=='/' ? "" : "/", 
-	       event->name);
+	printf("{ \"type\": \"event\", \"wd\": %u, \"path\": \"%s\", \"mask\": %u"
+	       //", \"len\": %u"
+	       " }\n", 
+	       event->wd, 
+	       event->len ? event->name : "",
+	       event->mask
+	       //, event->len
+		);
 	fflush(stdout);
 }
 
-int main(int argc, const char* argv[])
+int read_ino(int fd)
 {
-	int fd;
-	int j;
-	struct opts opts;
+	char buffer[EVENT_BUF_LEN];
+	int length=0;
+	int i=0;
 
-	opts=opts_init(argc, argv);
+	bzero(buffer, EVENT_BUF_LEN);
 
-	if (opts.dirc<=0 || opts.event_typec<=0) {
-		fprintf(stderr, "usage: %s dir1 dir2 .. -for create delete ..\n", argv[0]);
-		return 1;
+	length = read( fd, buffer, EVENT_BUF_LEN ); 
+	if ( length < 0 ) {
+		perror( "read" );
+		return length;	/* what to do. quit? */
+	}  
+
+	while (i<length) {
+		struct inotify_event *event = (struct inotify_event *) &buffer[i];     
+		report(event);
+		i += EVENT_SIZE + event->len;
+	}
+	return 0;
+}
+
+int cmd_execute(struct cmd *cmdp, int ino_fd)
+{
+	int status=-1;
+
+	/* todo: use dispatch (oo) */
+	if (cmdp->code==CMD_ADD) {
+
+		uint32_t wd=inotify_add_watch(ino_fd,cmdp->path,cmdp->mask);
+		if (wd<0) {
+			perror("inotify_add_watch");
+			status=wd;
+		} else {
+			printf("{ \"type\": \"status\", "
+			       "\"op\": \"add\", "
+			       "\"arg\": {"
+			       "\"path\": \"%s\", "
+			       "\"mask\": %u "
+			       "}, "
+			       "\"wd\": %u "
+			       "}\n", 
+			       cmdp->path, 
+			       cmdp->mask, 
+			       wd);
+			status=0;
+		}
+
+	} else if (cmdp->code==CMD_RM) {
+
+		int s=inotify_rm_watch(ino_fd, cmdp->wd);
+		/* replay */
+		
+		if (s<0) {
+			perror("inotify_rm_watch");
+			status=s;
+		} else {
+			printf("{ "
+			       "\"type\": \"rm\", "
+			       "\"wd\": %u, "
+			       "\"status\": %d "
+			       "}\n",
+			       cmdp->wd, s);
+			status=0;
+		}
+	} else {
+		fprintf(stderr, "error: unkown code %d\n", cmdp->code);
+		status=-1;
 	}
 
-	fd = inotify_init();
-	if ( fd < 0 ) {
+	return status;
+}
+
+
+int main(int argc, const char* argv[])
+{
+	int read_fds[]={0,-1};
+	fd_set read_fdset;
+	int i;
+
+	read_fds[1]=inotify_init();
+	if (debug)
+		fprintf(stderr, "debug: ino_fd %d\n", read_fds[1]);
+	if ( read_fds[1] < 0 ) {
 		perror( "inotify_init" );
 	}
 
-	fprintf(stderr, "watching ");
-	for (j=0; j<opts.dirc; j++) {
-		opts.dirv[j].wd = inotify_add_watch( fd, opts.dirv[j].path, opts.mask );
-		fprintf(stderr, "%s ", opts.dirv[j].path);
-	}
-	fprintf(stderr, "for ");
-	for (j=0; j<opts.event_typec; j++) {
-		if (opts.mask & opts.event_typev[j]->mask) {
-			fprintf(stderr, "%s%s", j>0 ? "|" : "", opts.event_typev[j]->name);
+	for (;;) {
+		int r;
+		int maxfdplus=-1;
+
+		FD_ZERO(&read_fdset);
+		for (i=0; i<2; i++) {
+			FD_SET(read_fds[i], &read_fdset);
+			if (maxfdplus<read_fds[i]+1) {
+				maxfdplus=read_fds[i]+1;
+			}
 		}
-	}
-	fprintf(stderr, "\n");
 
-	for(;;) {
-		char buffer[EVENT_BUF_LEN];
-		int length=0;
-		int i=0;
+		r=select(maxfdplus, &read_fdset, NULL, NULL, NULL);
 
-		length = read( fd, buffer, EVENT_BUF_LEN ); 
-		if ( length < 0 ) {
-			perror( "read" );
-		}  
+		if (debug) {
+			for (i=0; i<2; i++) {
+				if (FD_ISSET(read_fds[i], &read_fdset)) {
+					fprintf(stderr, "debug: fd_isset=%d\n", read_fds[i]);
+				}
+			}
+		}
 
-		while (i<length) {
-			struct inotify_event *event = (struct inotify_event *) &buffer[i];     
-			if (event->len>0) {
-				report(event, &opts);
-				i += EVENT_SIZE + event->len;
+		if (r<0) {
+			perror("select");
+		} else if (r==0) { /* timeout */
+			fprintf(stderr, "timeout\n");
+		} else {	/* r>0 */
+			if (FD_ISSET(0, &read_fdset)) { /* xx use struct to dispatch */
+				struct cmd cmd;
+				
+				cmd_zero(&cmd);
+				read_cmd(0, &cmd);
+				if (debug)
+					cmd_dump(&cmd);
+				if (cmd.code==CMD_QUIT) {
+					break;
+				} else {
+					/* 
+					 * xxx perhaps commands should not be executed here 
+					 * in the handler.  may be the info should be saved
+					 * and written when ino_fd is writable.
+					 * there is a race where commands a lost 
+					 * when they come in rapid succession..
+					 */
+					int s=cmd_execute(&cmd, read_fds[1]);
+					if (s<0) {
+						fprintf(stderr, "error: executing cmd");
+					}
+				}
+	
+			} else if (FD_ISSET(read_fds[1], &read_fdset)) {
+				read_ino(read_fds[1]);
 			}
 		}
 	}
-	/* 
-	 * clean up
-	 */
-	for (j=0; j<opts.dirc; j++) {
-		inotify_rm_watch(fd, opts.dirv[j].wd);
-	}
-	opts_finish(&opts);
-	close( fd );
+	return 0;
 }
