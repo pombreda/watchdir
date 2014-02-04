@@ -49,21 +49,34 @@ def mask_to_flags(mask):
 @baker.command
 def watch(root):
 
+    # xx how should flags be passed in?
     mask=0
     for f in flags:
-        mask|=f.mask
+        if f.mask!=FLAG.ACCESS.mask: # xx testing
+            mask|=f.mask
 
     engine_path=os.path.abspath(os.path.join(os.path.dirname(__file__), 'watchdir'))
-    engine=Popen([engine_path], stdin=PIPE, stdout=PIPE)
+    assert os.path.exists(engine_path), ('need', engine_path)
+    try:
+        engine=Popen([engine_path], stdin=PIPE, stdout=PIPE)
+    except Exception, e:
+        print >>sys.stderr, 'ERROR:', e, [engine_path]
+        e.args+=(engine_path,)
+        raise
 
-    dirs=[cur for cur,_,_ in os.walk(root)]
+    if root=='-':
+        # read seed dirs from stdin
+        dirs=[d.strip() for d in sys.stdin.readlines()]
+    else:
+        dirs=[cur for cur,_,_ in os.walk(root)]
+
     for d in dirs:
         cmd='add {dir} {mask}\n'.format(dir=d, mask=mask)
         print >>sys.stderr, 'cmd:', cmd.strip('\n')
         sys.stderr.flush()
         engine.stdin.write(cmd)
         # xxx workaround for a race
-        time.sleep(0.1)         
+        #time.sleep(0.05)         
 
     wd_to_path={}
 
@@ -118,10 +131,109 @@ def watch(root):
             elif mask & FLAG.DELETE.mask:
                 pass
 
-        print json.dumps(event)
+        event['time']=time.time()
+        # make event useful for caller
+        # {"path": "foo", "wd": 1, "type": "event", "mask": 2, "flags": ["MODIFY"]}
+        if event['type']=='event':
+            report=dict(path=os.path.join(wd_to_path[event['wd']], event['path']),
+                        flags=event['flags'],
+                        time=event['time'])
+        else:
+            report=event
+
+        print json.dumps(report)
+            
+                              
         sys.stdout.flush()
         
     engine.wait()
+
+
+def modified():
+    
+    while True:
+        line=sys.stdin.readline()
+        if not line:
+            break
+        try:
+            notice=json.loads(line)
+        except ValueError, e:
+            print >>sys.stderr, e
+            continue
+        if 'MODIFY' in notice.get('flags', []):
+            yield (notice['path'], notice['time'])
+
+def reduce(items):
+
+    last=None
+
+    for k,v in items:
+
+        if last is None:
+            # first time
+            pass
+        elif k==last:
+            # continuation
+            pass
+        else:
+            # boundry
+            yield k
+
+        last=k
+
+    if k is not None:
+        yield k
+
+
+@baker.command
+def tailall(max_fh=20, gc_int=40):
+
+    path_to_fh={}
+
+    for i,path in enumerate(reduce(modified())):
+
+        print path
+        
+        fh_ts=path_to_fh.get(path)
+
+        if fh_ts:
+            fh,_=fh_ts
+        else:
+            # 
+            # todo: 
+            #   at the first detected modify, start monitoring at the end.
+            #   (so the append that initiated the monitoring is lost)
+            #   aggregate the subsequent writes by waiting.
+            #   when a sequence of writes are punctuated, drain up to the end.
+            #   so
+            #     ..
+            #     foo
+            #     bar    drain foo, attach bar
+            #     bar    -
+            #     bar    -
+            #     baz    drain bar, attach baz
+            # 
+            # reduce needs to emit (key, start), (key, end)
+            # 
+            # 
+            fh=file(path,'r')
+            fh.seek(0,2)
+            path_to_fh[path]=(fh,time.time())
+
+        for line in fh.readlines():
+            print '\t'.join([path, line.strip('\n')])
+            sys.stdout.flush()
+
+        # every so often, gc ones that have been inactive for a while
+        # todo: heep
+        if len(path_to_fh)>max_fh and i%40==0:
+            items=path_to_fh.items() # [ (path,(fh,ts)), .. ]
+            items.sort(key=lambda item: item[1][1])
+            for p,(f,t) in items[:max_fh]:
+                f.close()
+                del path_to_fh[p]
+                print >>sys.stderr, 'gc:', p, t
+                sys.stderr.flush()
 
 
 baker.run()
