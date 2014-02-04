@@ -53,7 +53,7 @@ def watch(root):
     for f in flags:
         mask|=f.mask
 
-    engine_path=os.path.join(os.path.dirname(__file__), 'watchdir')
+    engine_path=os.path.abspath(os.path.join(os.path.dirname(__file__), 'watchdir'))
     engine=Popen([engine_path], stdin=PIPE, stdout=PIPE)
 
     dirs=[cur for cur,_,_ in os.walk(root)]
