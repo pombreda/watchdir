@@ -49,10 +49,10 @@ def mask_to_flags(mask):
 @baker.command
 def watch(root):
 
-    # xx how should flags be passed in?
+    # xxx how should flags be passed in?
     mask=0
     for f in flags:
-        if f.mask!=FLAG.ACCESS.mask: # xx testing
+        if f.mask!=FLAG.ACCESS.mask: # xx
             mask|=f.mask
 
     engine_path=os.path.abspath(os.path.join(os.path.dirname(__file__), 'watchdir'))
@@ -163,65 +163,30 @@ def modified():
         if 'MODIFY' in notice.get('flags', []):
             yield (notice['path'], notice['time'])
 
-def reduce(items):
-
-    last=None
-
-    for k,v in items:
-
-        if last is None:
-            # first time
-            pass
-        elif k==last:
-            # continuation
-            pass
-        else:
-            # boundry
-            yield k
-
-        last=k
-
-    if k is not None:
-        yield k
-
-
 @baker.command
 def tailall(max_fh=20, gc_int=40):
 
+    try:
+        import setproctitle
+        setproctitle.setproctitle('tailall')
+    except ImportError:
+        pass
+
     path_to_fh={}
 
-    for i,path in enumerate(reduce(modified())):
-
-        print path
+    for i,(path,_) in enumerate(modified()):
         
         fh_ts=path_to_fh.get(path)
 
         if fh_ts:
             fh,_=fh_ts
         else:
-            # 
-            # todo: 
-            #   at the first detected modify, start monitoring at the end.
-            #   (so the append that initiated the monitoring is lost)
-            #   aggregate the subsequent writes by waiting.
-            #   when a sequence of writes are punctuated, drain up to the end.
-            #   so
-            #     ..
-            #     foo
-            #     bar    drain foo, attach bar
-            #     bar    -
-            #     bar    -
-            #     baz    drain bar, attach baz
-            # 
-            # reduce needs to emit (key, start), (key, end)
-            # 
-            # 
             fh=file(path,'r')
             fh.seek(0,2)
             path_to_fh[path]=(fh,time.time())
 
         for line in fh.readlines():
-            print '\t'.join([path, line.strip('\n')])
+            print '\t'.join([path, line.strip('\n').replace('\t', ' ')])
             sys.stdout.flush()
 
         # every so often, gc ones that have been inactive for a while
@@ -234,6 +199,5 @@ def tailall(max_fh=20, gc_int=40):
                 del path_to_fh[p]
                 print >>sys.stderr, 'gc:', p, t
                 sys.stderr.flush()
-
 
 baker.run()
