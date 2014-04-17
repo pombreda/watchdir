@@ -166,6 +166,10 @@ def modified():
 @baker.command
 def tailall(max_fh=20, gc_int=40):
 
+    # need a str version of '\t', '\n', ' ' to operate on encoded (non-unicode) lines.
+    HT,LF,SP=[c.encode('utf8') for c in ['\t', '\n', ' ']]
+    assert isinstance(HT, str)
+
     try:
         import setproctitle
         setproctitle.setproctitle('tailall')
@@ -186,7 +190,14 @@ def tailall(max_fh=20, gc_int=40):
             path_to_fh[path]=(fh,time.time())
 
         for line in fh.readlines():
-            print '\t'.join([path, line.strip('\n').replace('\t', ' ')])
+            try:
+                # Compose output using bytestring operations, since the encoding of line
+                # is unknown. If any of the operand is unicode, implicit conversion and encoding 
+                # results, leading to error.
+                print HT.join([path.encode('utf8'), line.strip(LF).replace(HT, SP)])
+            except Exception, e:
+                print >>sys.stderr, 'xx:', [e, line]
+                raise
             sys.stdout.flush()
 
         # every so often, gc ones that have been inactive for a while
