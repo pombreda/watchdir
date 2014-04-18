@@ -1,16 +1,30 @@
 
-name=watchdir
+all: $(engine)
 
-all: $(name)
+-include local.mk
+
+engine?=watchdir
+exe=$(engine) watchdir.py
+prefix?=/usr/local
+version?=0.1
+
 clean:
-	rm -f $(name)
-
-# $(name): $(name).c
+	rm -f $(engine)
 
 %: %.c
-	gcc -g -Wall -o $@ $<
+	gcc -Wall -o $@ $<
 
 test: watchdir
 	./test.sh
 
--include local.mk
+install: $(exe)
+	install $^ $(prefix)/bin/
+
+debify.py:
+	wget https://raw.githubusercontent.com/tengu/debify/master/debify.py
+
+debian: watchdir_$(version).deb
+
+watchdir_$(version).deb: debify.py
+	echo $(exe) | tr ' ' '\n' | sed 's|^|$(prefix)/bin/|' \
+	| python debify.py pack_paths watchdir_$(version) 'command that watches for events under a directory'

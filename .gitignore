@@ -4,3 +4,5 @@ x
 x.*
 xx*
 local.mk
+debify.py
+*.deb
