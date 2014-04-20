@@ -159,78 +159,112 @@ def watch(root):
         
     engine.wait()
 
+class File(object):
+    """struct to hold path and file object"""
 
-def modified():
+    def __init__(self, path, seek=None, open=True):
+
+        self.path=path
+        self.seek=seek
+        if open:
+            self.fh=file(path, 'r')
+            if seek:
+                self.fh.seek(0, seek)
+            print self
+
+    def __repr__(self):
+        return 'File(%s, %s)' % (self.path, self.seek)
     
+    def __hash__(self):
+        return hash(self.path)
+
+    def __eq__(self, other):
+        return self.path==other.path
+
+    def fileno(self):
+        return self.fh.fileno()
+
+# need a str version of '\t', '\n', ' ' to operate on byte string lines.
+HT,LF,SP=[c.encode('utf8') for c in ['\t', '\n', ' ']]
+
+@baker.command
+def tailall():
+
+    files=set()
+
     while True:
+        # read from the controll channel
         line=sys.stdin.readline()
         if not line:
             break
-        try:
-            notice=json.loads(line)
-        except ValueError, e:
-            print >>sys.stderr, 'malformed event', [line], e
-            continue
-        if 'MODIFY' in notice.get('flags', []):
-            yield (notice['path'], notice['time'])
 
-FileInfo=namedtuple('FileInfo', 'fh timestamp error'.split())
+        # add new files to watch
+        event=json.loads(line)
+        flags=event.get('flags',[])
+        path=event.get('path')
+        if not path:
+            pass
+        elif 'CLOSE_WRITE' in flags:
+            print >>sys.stderr, 'remove:', path # xx not getting called?
+            files.discard(File(path, open=False))
+        elif File(path, open=False) in files:
+            pass
+        elif 'MODIFY' in flags:
+            files.add(File(path, seek=2))
+        elif 'OPEN' in flags:
+            files.add(File(path))
+
+        # drain each file on which activities have been detected
+        for logfile in files:
+            while True:
+                line=logfile.fh.readline()
+                if not line:
+                    break
+                # taillall output
+                print HT.join([logfile.path.encode('utf8'), line.strip(LF).replace(HT, SP)])
+                
+
+def ints(start=0):
+    i=start
+    while True:
+        yield i
+        i+=1
 
 @baker.command
-def tailall(max_fh=20, gc_int=40):
+def writer(iterations=10, label=None, chunk=10, line=500, sleep=1, out=None, flush=False, debug=False):
+    """log writer for testing"""
 
-    # need a str version of '\t', '\n', ' ' to operate on encoded (non-unicode) lines.
-    HT,LF,SP=[c.encode('utf8') for c in ['\t', '\n', ' ']]
-    assert isinstance(HT, str)
+    import random
 
-    try:
-        import setproctitle
-        setproctitle.setproctitle('tailall')
-    except ImportError:
-        pass
+    if not label:
+        label=str(os.getpid())
+    
+    if out:
+        outfile=file(out, 'w')
+    else:
+        outfile=sys.stdout
 
-    path_to_fh={}
-
-    for i,(path,_) in enumerate(modified()):
-        
-        fileinfo=path_to_fh.get(path)
-
-        if not fileinfo:
-            fh,err=None,None
-            try:
-                fh=file(path,'r')
-                fh.seek(0,2)
-            except IOError, err:
-                print >>sys.stderr, json.dumps(['WARN', 'failed to open', [path, str(err)]])
-                # remember to ignore this one since permission is unlikely to change..
-            fileinfo=FileInfo(fh, time.time(), err)
-            path_to_fh[path]=fileinfo
-
-        assert fileinfo
-        if fileinfo.error:        # presumably unrecoverable..
-            print >>sys.stderr, json.dumps(['DEBUG', 'ignore bad file', (path, fileinfo.timestamp, repr(fileinfo.error))])
-            continue
-
-        for line in fh.readlines():
-            try:
-                # Compose output using bytestring operations, since the encoding of line
-                # is unknown. If any of the operand is unicode, implicit conversion and encoding 
-                # results, leading to error.
-                print HT.join([path.encode('utf8'), line.strip(LF).replace(HT, SP)])
-            except Exception, e:
-                print >>sys.stderr, 'xx:', [e, line]
-                raise
-            sys.stdout.flush()
-
-        # every so often, gc ones that have been inactive for a while
-        # todo: heep
-        if len(path_to_fh)>max_fh and i%40==0:
-            items=path_to_fh.items() # [ (path,FileInfo), .. ]
-            items.sort(key=lambda item: item[1].timestamp)
-            for p,fi in items[:max_fh]:
-                fi.fh.close()
-                del path_to_fh[p]
-                print >>sys.stderr, 'gc:', p, fi.timestamp
+    n=0
+    
+    for i in ints():
+        if i>=iterations:
+            break
+        # print some lines
+        cs=random.randrange(0,chunk)
+        for j in range(cs):
+            # each with some length
+            length=random.randrange(0,line)
+            outline=' '.join(map(str,[label, n, '.' * length, '$']))
+            print >>outfile, outline
+            if flush:
+                outfile.flush()
+            if debug:
+                print >>sys.stderr, outline
                 sys.stderr.flush()
+            n+=1
+        # sleep some
+        time.sleep(random.random()*sleep)
+    
+
 
 baker.run()

@@ -6,3 +6,4 @@ xx*
 local.mk
 debify.py
 *.deb
+*.pyc
