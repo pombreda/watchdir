@@ -209,6 +209,8 @@ def tailall():
             files.discard(File(path, open=False))
         elif File(path, open=False) in files:
             pass
+        elif not os.path.isfile(path): # xx get the entry type from the watcher to avoid stat.
+            print >>sys.stderr, 'warn: not a file', path
         elif 'MODIFY' in flags:
             files.add(File(path, seek=2))
         elif 'OPEN' in flags:
@@ -222,6 +224,7 @@ def tailall():
                     break
                 # taillall output
                 print HT.join([logfile.path.encode('utf8'), line.strip(LF).replace(HT, SP)])
+                sys.stdout.flush()
                 
 
 def ints(start=0):
