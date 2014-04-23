@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import sys,os
+import re
 import time
 import json
 from subprocess import Popen, PIPE
@@ -166,11 +167,20 @@ class File(object):
 
         self.path=path
         self.seek=seek
+        self.error=None
         if open:
-            self.fh=file(path, 'r')
-            if seek:
+            try:
+                self.fh=file(path, 'r')
+            except IOError, e:
+                # mark this as bad and keep a record.
+                print >>sys.stderr, json.dumps(['WARN', 'filed to open', (repr(e), path)])
+                self.fh=None
+                self.error=e
+
+            if self.fh and seek:
                 self.fh.seek(0, seek)
-            print self
+
+            print >>sys.stderr, self
 
     def __repr__(self):
         return 'File(%s, %s)' % (self.path, self.seek)
@@ -188,7 +198,15 @@ class File(object):
 HT,LF,SP=[c.encode('utf8') for c in ['\t', '\n', ' ']]
 
 @baker.command
-def tailall():
+def tailall(exclude_path=None):
+    """
+    * exclude_path paths matching regex passed here will be excluded.
+    """
+
+    if exclude_path:
+        exclude_path_rx=re.compile(exclude_path)
+    else:
+        exclude_path_rx=None
 
     files=set()
 
@@ -204,6 +222,8 @@ def tailall():
         path=event.get('path')
         if not path:
             pass
+        elif exclude_path_rx and exclude_path_rx.match(path):
+            print >>sys.stderr, json.dumps(['INFO', 'exclude', path])
         elif 'CLOSE_WRITE' in flags:
             print >>sys.stderr, 'remove:', path # xx not getting called?
             files.discard(File(path, open=False))
@@ -213,13 +233,13 @@ def tailall():
             print >>sys.stderr, 'warn: not a file', path
         elif 'MODIFY' in flags:
             files.add(File(path, seek=2))
-        elif 'OPEN' in flags:
-            files.add(File(path))
 
         # drain each file on which activities have been detected
         for logfile in files:
+            if logfile.error:
+                continue
             while True:
-                line=logfile.fh.readline()
+                line=logfile.fh.readline() # xx could block..
                 if not line:
                     break
                 # taillall output
