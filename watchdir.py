@@ -173,6 +173,7 @@ class File(object):
                 self.fh=file(path, 'r')
             except IOError, e:
                 # mark this as bad and keep a record.
+                # xx these will have to be gc'ed or they will accumulate..
                 print >>sys.stderr, json.dumps(['WARN', 'filed to open', (repr(e), path)])
                 self.fh=None
                 self.error=e
@@ -229,7 +230,7 @@ def tailall(exclude_path=None):
             files.discard(File(path, open=False))
         elif File(path, open=False) in files:
             pass
-        elif not os.path.isfile(path): # xx get the entry type from the watcher to avoid stat.
+        elif not os.path.isfile(path):
             print >>sys.stderr, 'warn: not a file', path
         elif 'MODIFY' in flags:
             files.add(File(path, seek=2))
